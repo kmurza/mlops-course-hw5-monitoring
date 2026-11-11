@@ -1,0 +1,74 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "targets": [
+        { "expr": "rate(db_records_total[1m])", "legendFormat": "records/s", "refId": "A" }
+      ],
+      "title": "DB write rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "targets": [
+        { "expr": "histogram_quantile(0.95, rate(db_write_seconds_bucket[1m]))", "legendFormat": "p95", "refId": "A" },
+        { "expr": "histogram_quantile(0.5, rate(db_write_seconds_bucket[1m]))", "legendFormat": "p50", "refId": "B" }
+      ],
+      "title": "DB write time (p50/p95)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "id": 3,
+      "targets": [
+        { "expr": "rate(db_fraud_total[1m])", "legendFormat": "fraud/s", "refId": "A" }
+      ],
+      "title": "Fraud records per second",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "id": 4,
+      "options": { "calculate": false },
+      "targets": [
+        { "expr": "sum by (le) (rate(db_score_bucket[1m]))", "format": "heatmap", "legendFormat": "{{le}}", "refId": "A" }
+      ],
+      "title": "Written scores distribution",
+      "type": "heatmap"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 16 },
+      "id": 5,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "horizontal", "textMode": "auto" },
+      "targets": [
+        { "expr": "db_records_total", "legendFormat": "Total records", "refId": "A" },
+        { "expr": "db_fraud_total", "legendFormat": "Total fraud", "refId": "B" }
+      ],
+      "title": "Totals",
+      "type": "stat"
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["mlops", "db"],
+  "templating": { "list": [] },
+  "time": { "from": "now-15m", "to": "now" },
+  "timezone": "browser",
+  "title": "DB Writer",
+  "uid": "db-writer-dashboard",
+  "version": 1
+}

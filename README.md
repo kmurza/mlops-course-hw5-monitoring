@@ -1,128 +1,149 @@
-# MLOps: Автоматическое переобучение модели фрод-детекции
+# MLOps HW5: мониторинг fraud-detector
 
-В этом проекте модель машинного обучения сама переобучается по расписанию, а данные перед этим проходят автоматическую проверку на качество.
+Сервис скоринга фродовых транзакций с наблюдаемостью: Prometheus собирает метрики с живого потока, Grafana строит дашборды, настроены алерты на аномалии и срез из PostgreSQL.
 
-## 🏗 Архитектура
+## Архитектура
+| Откуда | Куда | Что передаётся | Транспорт |
+|---|---|---|---|
+| Streamlit | Kafka (`transactions`) | CSV-транзакции | Kafka producer |
+| Kafka (`transactions`) | scorer | Транзакции на скоринг | Kafka consumer |
+| scorer | Kafka (`scoring`) | Скоры / флаг фрода | Kafka producer |
+| Kafka (`scoring`) | db_consumer | Результаты скоринга | Kafka consumer |
+| db_consumer | PostgreSQL (`fraud_db.scores`) | Записи скоров | SQL INSERT |
+| scorer, db_consumer, node-exporter | Prometheus | `/metrics` | HTTP scrape |
+| Prometheus | Grafana | Ряды метрик | datasource |
+| PostgreSQL | Grafana | Срез `scores` | SQL |
+## Запуск
 
-Проект состоит из следующих сервисов (все поднимаются через `docker-compose`):
-- **Zookeeper & Kafka**: брокер сообщений для потоковой передачи транзакций.
-- **Scorer**: сервис на Python, который читает транзакции из Kafka, делает предсказание и отправляет результат обратно в Kafka.
-- **DB Consumer**: сервис, который пишет результаты скоринга (score, fraud_flag, model_version) в PostgreSQL.
-- **PostgreSQL**: база данных для хранения результатов.
-- **Airflow (Webserver & Scheduler)**: оркестратор пайплайнов переобучения и проверки данных.
-- **Streamlit Interface**: веб-интерфейс для отправки тестовых транзакций и просмотра результатов.
-
-
-## 🚀 Быстрый старт
-
-### Требования
-- Docker 20.10+
-- Docker Compose 2.0+
-
-### Запуск
 ```bash
-git clone https://github.com/kmurza/mlops-course-hw.git
-cd mlops-course-hw/hw3-airflow
-
-# Сборка и запуск всех сервисов
-docker-compose up --build
+docker compose up -d --build
 ```
+Подождать ~30 секунд, пока поднимутся Kafka, Airflow, scorer, db_consumer, Prometheus, Grafana.
 
-## 🔗 Доступные интерфейсы:
-- **Airflow UI**: http://localhost:8080 (Логин: admin, Пароль: admin) — для запуска DAG'ов.
-- **Streamlit UI**: http://localhost:8600 — для ручного тестирования скоринга.
-- **Kafka UI**: http://localhost:8601 — для просмотра топиков и сообщений.
+## Доступы
+| Сервис                        | URL                     | Логин  | Пароль   |
+|-------------------------------|-------------------------|--------|----------|
+| Grafana                       | http://localhost:3000   | admin  | Qwerty   |
+| Prometheus                    | http://localhost:9090   | —      | —        |
+| Streamlit (загрузка транзакций)| http://localhost:8600  | —      | —        |
+| Airflow                       | http://localhost:8080   | admin  | admin    |
+| Kafka UI                      | http://localhost:8601   | —      | —        |
 
-## 🛠️ Использование
+## Метрики
+| Метрика | Тип | Назначение | График / панель |
+|---|---|---|---|
+| `scoring_transactions_total` | Counter | Число обработанных транзакций | **Transactions per second** |
+| `scoring_processing_seconds` | Histogram | Время обработки одной транзакции | **Processing time (p50/p95)** |
+| `scoring_score` | Histogram | Распределение скоров | **Score distribution (heatmap)** |
+| `scoring_fraud_total` | Counter | Число транзакций, помеченных как фрод | **Fraud ratio** |
+| `scoring_model_reload_total{version}` | Counter | Счётчик подхватов модели; увеличивается при смене `current_model.pkl` | **Annotation «model version change»** на дашборде Scoring |
+| `scoring_model_info{version}` | Gauge | Текущая версия модели (`1` у активной) | **Totals** внизу дашборда Scoring |
+## Сервис db_consumer (порт 8000)
+| Метрика | Тип | Назначение | График / панель |
+|---|---|---|---|
+| `db_records_total` | Counter | Число записанных скоров | **DB write rate** |
+| `db_write_seconds` | Histogram | Время записи в PostgreSQL | **DB write time (p50/p95)** |
+| `db_fraud_total` | Counter | Число записанных фрод-транзакций | **Fraud records per second** |
+| `db_score` | Histogram | Распределение записанных скоров | **Written scores distribution** |
 
-1. Откройте Airflow UI (http://localhost:8080).
+## node-exporter (порт 9100)
+Стандартные метрики ОС (node_cpu_seconds_total, node_memory_*, node_network_*, node_filesystem_*).
 
-2. Включите DAG retrain_fraud_model и нажмите Trigger DAG (▶) для запуска переобучения.
+## Дашборды
+Все дашборды лежат в репозитории (monitoring/grafana/dashboards/) и подхватываются через provisioning при старте Grafana.
 
-3. Дождитесь, пока все задачи станут зелеными. Новая модель появится в папке models/.
+1. Scoring (обработка транзакций)
+   - Transactions per second — TPS из scoring_transactions_total.
+   - Processing time (p50/p95) — квантили scoring_processing_seconds.
+   -  Fraud ratio — доля фрода (rate(scoring_fraud_total) / rate(scoring_transactions_total)).
+   - Score distribution (heatmap) — распределение скоров из scoring_score.
+   - Scores by model version — таблица из PostgreSQL: число скоров, число фродов, доля фрода, средний скор по каждой версии модели.
+   - Totals — накопительные счётчики и текущая версия модели.
+   - Annotation model version change — вертикальные линии при смене версии модели.
 
-4. Включите DAG data_quality_check и запустите его. HTML-отчет появится в папке reports/.
+2. DB Writer (запись в PostgreSQL)
 
-5. Откройте Streamlit UI (http://localhost:8600), загрузите CSV-файл с транзакциями и нажмите «Отправить».
+Скорость записи, p95/p50 времени записи, фрод-записи в секунду, heatmap записанных скоров, накопительные счётчики.
 
-6. Откройте Kafka UI (http://localhost:8601) → Topics → scoring → Messages. Убедитесь, что появились результаты (score, fraud_flag, model_version).
+3. System (node-exporter)
+CPU, RAM, network (RX/TX), disk used %.
 
+## Алерты
+Два правила в Grafana, лежат в `monitoring/grafana/provisioning/alerting/rules.yml`, появляются автоматически после docker compose up.
 
+| Алерт | Условие (PromQL) | Порог | Как проверить срабатывание |
+|---|---|---|---|
+| **Fraud ratio too high** | `sum(rate(scoring_fraud_total[5m])) / sum(rate(scoring_transactions_total[5m])) > 0.5` | Доля фрода > 50% за 5 минут | Временно поменять `FRAUD_THRESHOLD=0.1` в scorer, прогнать поток 5+ минут — доля фрода станет высокой, алерт перейдёт в **Firing**. Вернуть `0.5` назад. |
+| **Scoring stream stopped** | `sum(rate(scoring_transactions_total[5m])) == 0` | Нет транзакций за 5 минут | Остановить поток (не нажимать «Отправить» в Streamlit), подождать 5 минут — алерт перейдёт в **Firing**. |
 
-## Пайплайны в Airflow
+Смотреть: `http://localhost:3000` → Alerting → Alert rules. Доставка в Telegram/email не настроена (по условию задания не требуется).
 
-1. `retrain_fraud_model` (Переобучение)
+## Как проверить, что всё работает
+1. Поднять всё:
+```
+bash
+docker compose up -d --build
+```
+2. Проверить, что Prometheus видит таргеты:
 
-Состоит из задач:
-   - prepare: Берет исторические данные (`warehouse.csv`), нарезает на окно (3 месяца) и делит на train/test по времени.
-   - train: Обучает модель `LogisticRegression` и сохраняет метрики.
-   - evaluate: Сравнивает roc_auc новой модели с текущей. Если новая лучше — запускает `publish`.
-   - publish: Сохраняет модель в `models/current_model.pkl` и обновляет `state.json`.
-### Логика валидации модели
-После обучения новая модель сохраняет метрику `roc_auc` в файл `data/model_candidate.metrics.json`. Задача `evaluate` читает эту метрику и сравнивает с `roc_auc` текущей модели из `models/current_model.metrics.json`. Если файла с текущими метриками нет (первый запуск), модель публикуется безусловно. Если новая метрика **больше или равна** текущей, выполняется ветка `publish`; иначе — `skip_publish`, и модель не раскатывается на прод.
+   - Открыть `http://localhost:9090/targets` — все 4 таргета (`prometheus`, `node-exporter`, `scorer`, `db_consumer`) должны быть UP.
 
-### 2. `data_quality_check` (Проверка качества данных)
-Проверяет `warehouse.csv` на 5 правил и сохраняет HTML-отчет в папку `reports/`:
+3. Прогнать поток:
 
-1. **Нет пропусков в `amount`** — сумма транзакции не может быть пустой, иначе модель не сможет корректно обучиться.
-2. **Нет дат из будущего (`transaction_time`)** — дата транзакции не может быть позже текущей, это указывает на ошибку в данных.
-3. **Сумма (`amount`) больше нуля** — отрицательные или нулевые транзакции невозможны в реальной жизни.
-4. **У каждой транзакции указан мерчант (`merch`)** — отсутствие продавца делает транзакцию бесполезной для модели.
-5. **Целевой признак (`target`) бинарный (0 или 1)** — модель ожидает только два класса: фрод и не фрод.
+   - Открыть `http://localhost:8600` (Streamlit).
+   - Загрузить `train.csv` (или любой CSV с колонками транзакций).
+   - Нажать «Отправить».
 
-## Идемпотентность
-Файл `state.json` с указателем последнего обработанного месяца обновляется только в задаче `publish` после успешного сохранения модели. Если предыдущий запуск упал на этапе `train` или `evaluate`, `state.json` не изменится, и при повторном запуске будет обработан тот же самый месяц — данные не будут потеряны.
+4. Проверить, что метрики растут:
 
+   - Открыть `http://localhost:3000` → Dashboards → Scoring.
+   - TPS должен подняться выше нуля, `Fraud ratio` — живой, heatmap заполняется.
+   - Через 1–2 минуты — Totals внизу показывает накопленные счётчики.
 
-## Обновление модели (Hot Reload)
-Сервис `scorer` автоматически подхватывает новую модель из папки `models/` без перезапуска контейнера. Как только задача `publish` завершится, сервис начнет использовать новую версию модели. Версия модели записывается в базу данных и передается в Kafka.
+5. Проверить смену версии модели (annotation):
 
-## Структура проекта
+   - Обновить `mtime` модели:
+```
+bash
+touch models/current_model.pkl
+"v_test_$(date +%Y%m%d_%H%M%S)" > models/current_model.pkl.version
+```
+   - Прогнать ещё раз поток через Streamlit (10–20 строк).
+   - На дашборде Scoring появится вертикальная линия с подписью новой версии.
 
-```text
-hw3-airflow/
-├── dags/
-│   ├── retrain_dag.py          # Основной DAG переобучения
-│   ├── dq_dag.py               # DAG проверки качества данных
-│   ├── extend_warehouse_dag.py # DAG генерации новых данных
-│   ├── src/                    # Python-модули для DAG'ов
-│   │   ├── prepare.py
-│   │   ├── train.py
-│   │   ├── evaluate.py
-│   │   ├── publish.py
-│   │   ├── preprocessing.py
-│   │   └── extend_warehouse.py
-│   └── tasks/               
-├── data/
-│   └── warehouse.csv           # Исходные данные для обучения
-├── models/                     # Сюда сохраняется модель после переобучения
-├── reports/                    # Сюда сохраняются HTML-отчеты DQ
-├── scorer/
-│   ├── fraud_detector/         # Сервис скоринга (Kafka Consumer/Producer)
-│   │   ├── app/app.py
-│   │   ├── src/scorer.py
-│   │   ├── src/preprocessing.py
-│   │   └── Dockerfile
-│   ├── db_consumer/            # Сервис записи результатов в БД
-│   │   ├── consumer_to_db.py
-│   │   └── Dockerfile
-│   ├── interface/              # Streamlit UI
-│   │   ├── app.py
-│   │   └── Dockerfile
-│   └── init-db/                # SQL для создания таблицы scores
-│       └── init.sql
+6. Проверить алерты:
+
+   - Открыть `http://localhost:3000` → Alerting → Alert rules.
+   - Должны быть два правила (`Fraud ratio too high`, `Scoring stream stopped`) в статусе `Normal` или `Pending`.
+
+## Структура репозитория
+```
+text
+mlops-course-hw5-monitoring/
 ├── docker-compose.yml
-├── .gitignore
-└── README.md
+├── README.md
+├── dags/                          # Airflow DAGs (train, publish, evaluate)
+├── data/                          # train.parquet, test.parquet, model_candidate.pkl
+├── models/                        # current_model.pkl, logreg_model.pkl, .version
+├── scorer/
+│   ├── fraud_detector/            # app.py, preprocessing.py, scorer.py
+│   ├── db_consumer/               # consumer_to_db.py
+│   ├── interface/                 # Streamlit app
+│   └── init-db/init.sql           # Схема таблицы scores
+└── monitoring/
+    ├── prometheus.yml
+    └── grafana/
+        ├── provisioning/
+        │   ├── datasources/datasource.yml
+        │   ├── dashboards/dashboards.yml
+        │   └── alerting/
+        │       ├── contactpoints.yml
+        │       └── rules.yml
+        └── dashboards/
+            ├── scoring.json
+            ├── db_writer.json
+            └── system.json
 ```
 
-## Параметры
-- Глубина истории: 3 года (в extend_warehouse.py)
-- Размер батча: 100 000 строк (в extend_warehouse.py)
-- Окно обучения: 3 месяца (в retrain_dag.py)
-
-*Примечание:* 
-
-- Данные для обучения: data/warehouse.csv.
-- Для препроцессинга используется функция run_preproc из модуля preprocessing.py.
-- Все вычисления происходят на CPU.
+## Ограничения текущей реализации
+Фильтры `State` / `Merchant` на дашборде присутствуют, но в текущей версии Grafana multi-value переменные не подставляются в SQL корректно (`malformed array literal` / `syntax error`). Панели дашборда работают без фильтрации по этим полям. При необходимости легко включить: перевести переменные в режим single-value и использовать us_state = '$us_state' в SQL.

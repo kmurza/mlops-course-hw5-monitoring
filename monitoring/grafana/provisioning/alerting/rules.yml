@@ -1,0 +1,51 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: fraud-scoring-alerts
+    folder: Alerts
+    interval: 1m
+    rules:
+      - uid: fraud_ratio_high
+        title: Fraud ratio too high
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: sum(rate(scoring_fraud_total[5m])) / sum(rate(scoring_transactions_total[5m]))
+              refId: A
+              instant: true
+        noDataState: NoData
+        execErrState: Error
+        for: 5m
+        annotations:
+          summary: "Fraud ratio > 0.5 for 5 minutes"
+          description: "Доля фрод-транзакций превысила 50% на дашборде Scoring."
+        labels:
+          severity: warning
+
+      - uid: stream_stopped
+        title: Scoring stream stopped
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: sum(rate(scoring_transactions_total[5m]))
+              refId: A
+              instant: true
+        noDataState: Alerting
+        execErrState: Error
+        for: 5m
+        annotations:
+          summary: "No transactions processed in 5 minutes"
+          description: "Скоринг не обрабатывает транзакции — поток остановился."
+        labels:
+          severity: critical

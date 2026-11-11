@@ -1,0 +1,11 @@
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: default
+    receivers:
+      - uid: default-receiver
+        type: email
+        settings:
+          addresses: admin@localhost
+        disableResolveMessage: false
